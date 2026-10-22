@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Bill Checker</title>
+<style>
+:root{--bg:#fff;--fg:#1a1a1a;--mut:#666;--card:#f5f5f2;--bd:#d8d8d2;--ac:#0f6e56;--warn:#b45309;--bad:#b91c1c;--ok:#15803d;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#171716;--fg:#eee;--mut:#a0a09a;--card:#242422;--bd:#3a3a36;--ac:#34d399;--warn:#fbbf24;--bad:#f87171;--ok:#4ade80}}
+:root[data-theme="dark"]{--bg:#171716;--fg:#eee;--mut:#a0a09a;--card:#242422;--bd:#3a3a36;--ac:#34d399;--warn:#fbbf24;--bad:#f87171;--ok:#4ade80}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;padding:14px;max-width:720px;margin-inline:auto}
+h1{font-size:22px;margin:4px 0 12px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:12px;margin-bottom:12px}
+label{display:block;font-size:13px;color:var(--mut);margin:6px 0 2px}
+input{width:100%;padding:9px;border:1px solid var(--bd);border-radius:8px;background:var(--bg);color:var(--fg);font:inherit}
+button{padding:10px 14px;border:0;border-radius:8px;background:var(--ac);color:var(--bg);font:inherit;font-weight:600}
+button.g{background:transparent;color:var(--fg);border:1px solid var(--bd)}
+button:disabled{opacity:.5}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px}
+.sc{overflow-x:auto}
+table{border-collapse:collapse;min-width:600px;width:100%}
+th{font-size:12px;color:var(--mut);text-align:left;padding:4px}
+td{padding:3px;vertical-align:middle}
+td input{padding:6px}
+td.t{font-weight:600;white-space:nowrap}
+.s{font-size:12px;min-width:130px}
+.OK{color:var(--ok)}.FIX{color:var(--warn)}.BAD{color:var(--bad)}
+.n{font-size:13px;color:var(--mut);margin:6px 0 0}
+.tot{display:flex;justify-content:space-between;padding:4px 0}
+.big{font-size:20px;font-weight:700}
+img{max-width:100%;max-height:220px;border-radius:8px;margin-top:8px}
+[hidden]{display:none!important}
+</style></head><body>
+<h1>🧾 Bill Checker</h1>
+
+<div class="card">
+<label>Shop name</label><input id="shop" placeholder="Your shop name">
+<label>Customer name</label><input id="cust" placeholder="Customer name">
+</div>
+
+<div class="card">
+<b>1. Photo of handwritten bill</b>
+<div class="row"><input id="file" type="file" accept="image/*"></div>
+<img id="prev" hidden alt="Bill photo">
+<div class="row"><button id="read" disabled>Read bill with AI</button></div>
+<p class="n" id="msg">Take a clear, straight photo of the bill in good light.</p>
+</div>
+
+<div class="card">
+<b>2. Check and correct</b>
+<div class="sc"><table>
+<thead><tr><th>No</th><th>Name</th><th>Price</th><th>Qty</th><th>Total</th><th>Check</th><th></th></tr></thead>
+<tbody id="rows"></tbody></table></div>
+<div class="row"><button class="g" id="add">+ Add row</button></div>
+<p class="n" id="gnote"></p>
+</div>
+
+<div class="card">
+<div class="tot"><span>Items total</span><b id="sum"></b></div>
+<div id="prevrow" hidden class="tot"><label style="margin:0;color:var(--fg)"><input type="checkbox" id="usebal" style="width:auto"> <span id="ballbl"></span></label></div>
+<div class="tot"><span>Grand total</span><span class="big" id="grand"></span></div>
+<label>Paid now</label><input id="paid" inputmode="decimal" placeholder="0">
+<div class="tot"><span>Balance due</span><b id="due"></b></div>
+<div class="row"><button id="pdf">Download invoice PDF</button><button class="g" id="save">Save customer balance</button></div>
+<p class="n" id="msg2"></p>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script>
+const $=id=>document.getElementById(id);
+const num=v=>{if(v===null||v===undefined||v==="")return null;const n=parseFloat(String(v).replace(/[^0-9.\-]/g,""));return isNaN(n)?null:n};
+const r2=n=>Math.round(n*100)/100;
+const fmt=n=>"₹"+r2(n).toLocaleString("en-IN",{maximumFractionDigits:2});
+const esc=s=>String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const blank=()=>({name:"",price:"",qty:"",written:""});
+let rows=[blank()],wgt=null,blob=null,sample=null;
+
+const PROMPT="This is a photo of a handwritten shop bill with columns: No, Name, Price, Quantity, Total. Read every row exactly as written. Reply with ONLY JSON, no other text: {\"customer\":string|null,\"rows\":[{\"name\":string,\"price\":number|null,\"qty\":number|null,\"written_total\":number|null}],\"written_grand_total\":number|null}. Use null for anything missing or unreadable. Never calculate or guess: copy the numbers as written, even if they look wrong.";
+
+function calc(r){
+  const p=num(r.price),q=num(r.qty),w=num(r.written);
+  if(p!==null&&q!==null){
+    const t=r2(p*q);
+    if(w===null)return{t,s:r.written===""&&r._ai?"Total was missing, added":"OK",c:r._ai&&w===null?"FIX":"OK"};
+    if(Math.abs(w-t)>0.01)return{t,s:"Fixed: you wrote "+fmt(w),c:"FIX"};
+    return{t,s:"OK",c:"OK"};
+  }
+  if(w!==null)return{t:w,s:"Price or qty missing, check",c:"BAD"};
+  return{t:0,s:"Enter price and qty",c:"BAD"};
+}
+function render(){
+  $("rows").innerHTML=rows.map((r,i)=>`<tr><td>${i+1}</td>
+<td><input data-i="${i}" data-k="name" value="${esc(r.name)}"></td>
+<td><input data-i="${i}" data-k="price" inputmode="decimal" value="${esc(r.price)}" style="width:80px"></td>
+<td><input data-i="${i}" data-k="qty" inputmode="decimal" value="${esc(r.qty)}" style="width:64px"></td>
+<td class="t" id="t${i}"></td><td class="s" id="s${i}"></td>
+<td><button class="g" data-del="${i}" aria-label="Delete row">×</button></td></tr>`).join("");
+  update();
+}
+function update(){
+  let sum=0;
+  rows.forEach((r,i)=>{const c=calc(r);sum+=c.t;$("t"+i).textContent=fmt(c.t);const s=$("s"+i);s.textContent=c.s;s.className="s "+c.c});
+  sum=r2(sum);$("sum").textContent=fmt(sum);
+  $("gnote").textContent=wgt!==null&&Math.abs(wgt-sum)>0.01?"Your handwritten grand total was "+fmt(wgt)+". Corrected total is "+fmt(sum)+".":"";
+  const p=prevBal(),use=$("usebal").checked&&p>0;
+  const grand=r2(sum+(use?p:0));$("grand").textContent=fmt(grand);
+  $("due").textContent=fmt(grand-(num($("paid").value)||0));
+  return{sum,grand,p:use?p:0};
+}
+const key=()=>"bal:"+$("cust").value.trim().toLowerCase();
+function prevBal(){try{return $("cust").value.trim()?num(localStorage.getItem(key()))||0:0}catch(e){return 0}}
+function showPrev(){const p=prevBal();$("prevrow").hidden=!(p>0);$("ballbl").textContent="Add previous balance "+fmt(p)+"?";if(!(p>0))$("usebal").checked=false;update()}
+
+$("rows").addEventListener("input",e=>{const t=e.target;if(t.dataset.k){rows[+t.dataset.i][t.dataset.k]=t.value;update()}});
+$("rows").addEventListener("click",e=>{const d=e.target.dataset.del;if(d!==undefined){rows.splice(+d,1);if(!rows.length)rows=[blank()];render()}});
+$("add").onclick=()=>{rows.push(blank());render()};
+$("cust").oninput=showPrev;$("usebal").onchange=update;$("paid").oninput=update;
+
+$("file").onchange=async e=>{
+  const f=e.target.files[0];if(!f)return;
+  try{
+    const bm=await createImageBitmap(f),k=Math.min(1,1600/Math.max(bm.width,bm.height));
+    const c=document.createElement("canvas");c.width=Math.round(bm.width*k);c.height=Math.round(bm.height*k);
+    c.getContext("2d").drawImage(bm,0,0,c.width,c.height);
+    blob=await new Promise(r=>c.toBlob(r,"image/jpeg",.85));
+    $("prev").src=URL.createObjectURL(blob);$("prev").hidden=false;$("read").disabled=!sample;
+  }catch(x){$("msg").textContent="Could not open that photo. Try another one."}
+};
+$("read").onclick=async()=>{
+  if(!blob||!sample)return;
+  $("read").disabled=true;$("msg").textContent="Reading your bill… this can take up to a minute.";
+  try{
+    const d=await sample.json(PROMPT,{images:[blob]});
+    rows=(d.rows||[]).map(x=>({name:x.name||"",price:x.price==null?"":x.price,qty:x.qty==null?"":x.qty,written:x.written_total==null?"":x.written_total,_ai:1}));
+    if(!rows.length)rows=[blank()];
+    wgt=num(d.written_grand_total);
+    if(d.customer&&!$("cust").value){$("cust").value=d.customer;showPrev()}
+    render();$("msg").textContent="Done. Check the rows marked orange or red and fix anything misread.";
+  }catch(e){
+    $("msg").textContent=e&&e.code==="not_granted"?"Permission was declined, so the bill could not be read.":e&&e.code==="rate_limited"?"Too many tries. Wait a minute and try again.":"Could not read the bill. Try a clearer photo.";
+  }finally{$("read").disabled=false}
+};
+
+$("save").onclick=()=>{
+  const n=$("cust").value.trim();if(!n){$("msg2").textContent="Enter the customer name first.";return}
+  const {grand}=update(),due=r2(grand-(num($("paid").value)||0));
+  try{due>0?localStorage.setItem(key(),String(due)):localStorage.removeItem(key());$("msg2").textContent=due>0?"Saved: "+n+" owes "+fmt(due)+".":"Cleared: "+n+" has no balance."}
+  catch(e){$("msg2").textContent="Could not save on this device."}
+  showPrev();
+};
+$("pdf").onclick=async()=>{
+  const J=window.jspdf;if(!J){window.print();return}
+  const {sum,grand,p}=update(),paid=num($("paid").value)||0,R=n=>"Rs. "+r2(n).toLocaleString("en-IN",{maximumFractionDigits:2});
+  const d=new J.jsPDF();let y=20;
+  d.setFontSize(18);d.text($("shop").value||"Invoice",14,y);y+=8;
+  d.setFontSize(10);d.text("Date: "+new Date().toLocaleDateString("en-IN"),14,y);
+  if($("cust").value){d.text("Customer: "+$("cust").value,120,y)}y+=10;
+  const head=()=>{d.setFont(undefined,"bold");d.text("No",14,y);d.text("Item",26,y);d.text("Price",125,y,{align:"right"});d.text("Qty",150,y,{align:"right"});d.text("Total",196,y,{align:"right"});d.setFont(undefined,"normal");y+=3;d.line(14,y,196,y);y+=6};
+  head();
+  rows.forEach((r,i)=>{
+    if(y>270){d.addPage();y=20;head()}
+    const c=calc(r),p1=num(r.price),q=num(r.qty);
+    d.text(String(i+1),14,y);d.text(String(r.name||"").slice(0,48),26,y);
+    d.text(p1===null?"-":String(p1),125,y,{align:"right"});d.text(q===null?"-":String(q),150,y,{align:"right"});d.text(R(c.t),196,y,{align:"right"});y+=7;
+  });
+  if(y>240){d.addPage();y=20}
+  y+=2;d.line(14,y,196,y);y+=7;
+  const L=(a,b,bold)=>{d.setFont(undefined,bold?"bold":"normal");d.text(a,140,y);d.text(b,196,y,{align:"right"});y+=7};
+  L("Items total",R(sum));if(p>0)L("Previous balance",R(p));L("Grand total",R(grand),1);
+  if(paid>0){L("Paid",R(paid));L("Balance due",R(grand-paid),1)}
+  const name="Invoice-"+(($("cust").value.trim()||"bill").replace(/[^\w\-]+/g,"_"))+".pdf";
+  try{const dl=await claude.use("downloads");if(!dl)throw 0;await dl.save({filename:name,data:d.output("blob")})}
+  catch(e){if(e&&e.code==="declined")return;try{d.save(name)}catch(x){window.print()}}
+};
+
+(async()=>{
+  render();showPrev();
+  try{
+    if(window.claude){sample=await claude.use("sample");if(sample){const l=await sample.limits();if(!l.images)sample=null}}
+  }catch(e){sample=null}
+  if(!sample)$("msg").textContent="AI reading is not available here. You can still type the rows below and use the checker and PDF.";
+  else if(blob)$("read").disabled=false;
+})();
+</script></body></html>
